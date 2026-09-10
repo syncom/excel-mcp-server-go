@@ -1,0 +1,18 @@
+# Build output (anchored: must not match the cmd/excel-mcp-server/ package dir)
+/bin/
+/excel-mcp-server
+/excel-mcp-server-*
+
+# Runtime data: the default EXCEL_FILES_PATH sandbox for streamable-http
+/excel_files/
+
+# Go test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Editor and OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
