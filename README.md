@@ -21,16 +21,39 @@ the server.
 ```bash
 git clone https://github.com/syncom/excel-mcp-server-go.git
 cd excel-mcp-server-go
-go build -o bin/excel-mcp-server ./cmd/excel-mcp-server
+CGO_ENABLED=0 go build -o bin/excel-mcp-server ./cmd/excel-mcp-server
 ```
 
-Cross-compiling works the usual way:
+`CGO_ENABLED=0` is what makes the binary statically linked. Nothing here needs cgo —
+not this code, not either dependency — but with cgo enabled the standard library prefers
+libc-backed implementations of `net` (the glibc resolver) and `crypto/x509` (system root
+certificates), and the result picks up a dependency on `libc.so.6`. Turning cgo off costs
+this server nothing: it never resolves an outbound hostname and never opens an outbound
+TLS connection. Confirm with:
+
+```console
+$ ldd bin/excel-mcp-server
+	not a dynamic executable
+```
+
+Cross-compiling works the usual way. Keep `CGO_ENABLED=0` on every target — building for
+a different OS than the host disables cgo implicitly, but building for the host's own OS
+does not, so setting it explicitly is what keeps the three builds consistent:
 
 ```bash
-GOOS=darwin  GOARCH=arm64 go build -o bin/excel-mcp-server-darwin-arm64  ./cmd/excel-mcp-server
-GOOS=windows GOARCH=amd64 go build -o bin/excel-mcp-server-windows-amd64.exe ./cmd/excel-mcp-server
-GOOS=linux   GOARCH=amd64 go build -o bin/excel-mcp-server-linux-amd64   ./cmd/excel-mcp-server
+CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -o bin/excel-mcp-server-darwin-arm64  ./cmd/excel-mcp-server
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/excel-mcp-server-windows-amd64.exe ./cmd/excel-mcp-server
+CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -o bin/excel-mcp-server-linux-amd64   ./cmd/excel-mcp-server
 ```
+
+The Linux and Windows binaries come out fully static. The macOS one does not, and cannot:
+Apple supports no static libc, so a darwin binary always links `libSystem`. `CGO_ENABLED=0`
+still matters there — it keeps the resolver and certificate handling pure Go rather than
+binding to system libraries beyond that.
+
+For a release build, add `-trimpath -ldflags="-s -w"` to drop debug information and local
+build paths. That takes the linux/amd64 binary from 18.6 MB to 13.2 MB, at the cost of
+symbolized stack traces.
 
 ## Install
 
@@ -38,7 +61,7 @@ From a clone:
 
 ```bash
 cd excel-mcp-server-go
-go install ./cmd/excel-mcp-server
+CGO_ENABLED=0 go install ./cmd/excel-mcp-server
 ```
 
 This puts `excel-mcp-server` in `$(go env GOPATH)/bin`.
