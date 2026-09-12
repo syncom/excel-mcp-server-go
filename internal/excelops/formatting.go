@@ -174,6 +174,14 @@ func FormatRange(path, sheetName, startCell, endCell string, o FormatOptions) er
 		}
 	}
 
+	// Bound the sweep before the loop below starts mutating workbook state.
+	// Each iteration calls applyCellStyle -> NewStyle, so an oversized range
+	// both allocates per cell and leaves a partially applied format behind on
+	// its way to failing. See [checkRangeSize].
+	if err := checkRangeSize(excelerr.ErrFormatting, startRow, startCol, endRow, endCol); err != nil {
+		return err
+	}
+
 	for row := startRow; row <= endRow; row++ {
 		for col := startCol; col <= endCol; col++ {
 			cell, err := excelize.CoordinatesToCellName(col, row)

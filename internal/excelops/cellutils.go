@@ -9,6 +9,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
+	"github.com/syncom/excel-mcp-server-go/internal/excelerr"
 	"github.com/syncom/excel-mcp-server-go/internal/pyfmt"
 )
 
@@ -364,4 +365,64 @@ func pyColumnIndex(letters string) (int, error) {
 		col = col*26 + int(c-'A'+1)
 	}
 	return col, nil
+}
+
+// maxRangeCells bounds how many cells one tool call may visit.
+//
+// DEVIATION(D8): callers may name any end cell the A1 grammar allows, and the
+// grid is 16384 x 1048576. Both the read and the format path allocate per
+// visited cell and materialize the whole range before returning, so a single
+// well-formed request naming XFD1048576 on a two-row sheet asks for ~17 billion
+// cells. In Go that ends as `fatal error: out of memory`, which is not a
+// recoverable panic — it kills the process and every other session with it.
+//
+// Python has the same unbounded loop (data.py iterates `range(start_row,
+// end_row + 1)` over a caller-supplied end, and openpyxl's ws.cell() creates
+// each cell on access), but a CPython MemoryError is an ordinary exception:
+// `except Exception` turns it into a DataError and the caller gets an error
+// result. Bounding here reproduces that observable outcome — an error rather
+// than a dead server — which is why the refusal is raised as a normal kind.
+//
+// Documented in DEVIATIONS.md (D8). It still needs an entry in
+// conformance/deviations.json, following the D1-D7 pattern.
+//
+// The limit is set from measured cost per visited cell: ~800 B on the read path
+// and ~2 KB on the format path, so 200k cells is a transient of roughly 150 MB
+// and 360 MB respectively. That is far past any range a caller can usefully
+// consume — 200k cells is already tens of megabytes of response text — and far
+// below the point where the process is at risk.
+const maxRangeCells = 200_000
+
+// checkRangeSize rejects a range that would visit more than [maxRangeCells]
+// cells, before anything is allocated for it. kind selects the excelerr
+// sentinel so the refusal routes to the same MCP outcome as the calling tool's
+// other failures (SPEC 5.2).
+func checkRangeSize(kind error, startRow, startCol, endRow, endCol int) error {
+	rows := int64(endRow) - int64(startRow) + 1
+	cols := int64(endCol) - int64(startCol) + 1
+	if rows <= 0 || cols <= 0 {
+		return nil
+	}
+	if n := rows * cols; n > maxRangeCells {
+		return excelerr.New(kind, fmt.Sprintf(
+			"Range %s:%s covers %d cells, which exceeds the maximum of %d",
+			cellNameOrCoords(startCol, startRow), cellNameOrCoords(endCol, endRow),
+			n, maxRangeCells))
+	}
+	return nil
+}
+
+// cellNameOrCoords renders an A1 address, falling back to a row/column form
+// for coordinates excelize will not name.
+//
+// The fallback matters: an end past the grid's own limits — "B99999999", whose
+// row excelize rejects outright — is exactly the input that most needs the
+// range bound's message. Propagating the naming failure instead would report
+// "row number exceeds maximum limit" and say nothing about the limit that
+// actually stopped the request.
+func cellNameOrCoords(col, row int) string {
+	if name, err := excelize.CoordinatesToCellName(col, row); err == nil {
+		return name
+	}
+	return fmt.Sprintf("r%dc%d", row, col)
 }

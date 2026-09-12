@@ -87,7 +87,13 @@ func (s *Server) registerTierB(srv *mcp.Server) {
 		if err != nil {
 			return resultFor("read_data_from_excel", caught, "", err), nil, nil
 		}
-		if cells, ok := result.Get("cells"); !ok || len(cells.([]any)) == 0 {
+		// The assertion is checked rather than bare: an unchecked one here
+		// guards an invariant held in excelops, so a change over there would
+		// turn a wrong type into a panic with no local signal. A non-slice is
+		// treated as no data, which is the same answer an empty list gives.
+		cells, ok := result.Get("cells")
+		list, isSlice := cells.([]any)
+		if !ok || !isSlice || len(list) == 0 {
 			return textResult("No data found in specified range"), nil, nil
 		}
 		return textResult(pyfmt.Dumps(result)), nil, nil

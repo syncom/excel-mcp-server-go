@@ -31,16 +31,25 @@ type Config struct {
 // Server holds the configuration the tool handlers close over.
 type Server struct {
 	cfg Config
+
+	// locks serializes concurrent tool calls that name the same workbook.
+	// See [pathLocks].
+	locks *pathLocks
 }
 
 // New builds the MCP server. Tools are registered by [Server.register], which
 // is filled in tier by tier.
 func New(cfg Config) *mcp.Server {
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, locks: newPathLocks()}
 	srv := mcp.NewServer(
 		&mcp.Implementation{Name: ServerName, Version: ServerVersion},
 		&mcp.ServerOptions{Instructions: Instructions},
 	)
+	// Middleware runs outermost first, so the panic barrier wraps the lock:
+	// a panic inside a handler unwinds through serializeByPath's deferred
+	// release before the barrier turns it into a result, and the workbook's
+	// lock is never orphaned. See [panicBarrier] and [Server.serializeByPath].
+	srv.AddReceivingMiddleware(panicBarrier, s.serializeByPath)
 	s.register(srv)
 	return srv
 }

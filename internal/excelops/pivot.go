@@ -158,7 +158,10 @@ func CreatePivotTable(path, sheetName, dataRange string, rows, values, columns [
 		return "", excelerr.New(excelerr.ErrPivot, pyStr(err))
 	}
 
-	rowCombos := combinationsFor(records, cleanedRows)
+	rowCombos, err := combinationsFor(records, cleanedRows)
+	if err != nil {
+		return "", err
+	}
 
 	// DEVIATION(D3): Python accepts `columns`, advertises it in the schema, and
 	// ignores it — a caller asking to break out by region gets a row-only
@@ -166,7 +169,10 @@ func CreatePivotTable(path, sheetName, dataRange string, rows, values, columns [
 	// same way rows are built and emit one column per (combination x value
 	// field). When `columns` is empty the output is byte-identical to Python's.
 	// SPEC 5.3.2 D3; registered in conformance/deviations.json.
-	colCombos := combinationsFor(records, cleanedColumns)
+	colCombos, err := combinationsFor(records, cleanedColumns)
+	if err != nil {
+		return "", err
+	}
 
 	// Header row.
 	col := 1
@@ -289,14 +295,41 @@ func setAggCell(f *excelize.File, sheet, cell string, v any) error {
 	}
 }
 
+// maxPivotCombinations bounds the cartesian product [combinationsFor] builds.
+//
+// DEVIATION(D8): the product is the count of distinct values multiplied across
+// every grouped field, so three fields over high-cardinality columns is N^3 —
+// and the fields that invite grouping (dates, IDs, names, emails) are exactly
+// the ones whose values are all distinct. A 120-row sheet with 3 such row
+// fields yields ~1.7M combinations and over 2 GB, killing the process; 700 rows
+// with 2 fields "succeeds" after 21 s and 819 MB, which is its own denial of
+// service. No hostile argument is needed for either — just an ordinary call on
+// an ordinary spreadsheet.
+//
+// Python has the identical blowup and the port inherited it, so unlike the
+// range bound this refusal has no counterpart in the oracle; it is a deliberate
+// divergence. Documented in DEVIATIONS.md (D8); still to be registered in
+// conformance/deviations.json.
+//
+// The limit is far past any pivot a person can read — a table with
+// 50k grouped rows is not an answer to anything — and a refusal naming the
+// cause is strictly better than a dead server.
+const maxPivotCombinations = 50_000
+
 // combinationsFor builds the sorted unique value sets for each field and then
 // their cartesian product, matching _get_combinations.
-func combinationsFor(records []map[string]any, fields []string) []map[string]string {
+//
+// The product's size is computed from the per-field value counts *before* any
+// combination is allocated, so an oversized request costs nothing beyond the
+// scan it takes to count.
+func combinationsFor(records []map[string]any, fields []string) ([]map[string]string, error) {
 	if len(fields) == 0 {
-		return nil
+		return nil, nil
 	}
-	result := []map[string]string{{}}
-	for _, field := range fields {
+
+	uniqueByField := make([][]string, len(fields))
+	total := int64(1)
+	for i, field := range fields {
 		seen := map[string]bool{}
 		var uniq []string
 		for _, rec := range records {
@@ -313,11 +346,25 @@ func combinationsFor(records []map[string]any, fields []string) []map[string]str
 			}
 		}
 		sort.Strings(uniq)
+		uniqueByField[i] = uniq
 
-		var next []map[string]string
+		// Counted in int64 and checked every field, so the running product
+		// cannot overflow before the limit catches it.
+		total *= int64(len(uniq))
+		if total > maxPivotCombinations {
+			return nil, excelerr.New(excelerr.ErrPivot, fmt.Sprintf(
+				"Grouping by %s produces more than %d combinations; "+
+					"use fewer fields or fields with fewer distinct values",
+				strings.Join(fields, ", "), maxPivotCombinations))
+		}
+	}
+
+	result := []map[string]string{{}}
+	for i, field := range fields {
+		next := make([]map[string]string, 0, len(result)*len(uniqueByField[i]))
 		for _, combo := range result {
-			for _, v := range uniq {
-				merged := map[string]string{}
+			for _, v := range uniqueByField[i] {
+				merged := make(map[string]string, len(combo)+1)
 				for k, old := range combo {
 					merged[k] = old
 				}
@@ -327,7 +374,7 @@ func combinationsFor(records []map[string]any, fields []string) []map[string]str
 		}
 		result = next
 	}
-	return result
+	return result, nil
 }
 
 func comboLabel(combo map[string]string, fields []string) string {

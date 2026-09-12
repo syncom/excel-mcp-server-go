@@ -196,6 +196,13 @@ func ReadExcelRangeWithMetadata(path, sheetName, startCell, endCell string) (*py
 			Set("cells", []any{}), nil
 	}
 
+	// Bound the sweep before the loop below allocates a dict per cell. See
+	// [checkRangeSize]; read_data_from_excel catches nothing, so this surfaces
+	// as a tool error exactly as an uncaught DataError does in Python.
+	if err := checkRangeSize(excelerr.ErrData, startRow, startCol, endRow, endCol); err != nil {
+		return nil, err
+	}
+
 	startColName, err := excelize.ColumnNumberToName(startCol)
 	if err != nil {
 		return nil, excelerr.New(excelerr.ErrData, pyStr(err))

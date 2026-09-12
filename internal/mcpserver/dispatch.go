@@ -1,8 +1,11 @@
 package mcpserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
+	"runtime/debug"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,4 +52,49 @@ func resultFor(toolName string, caught []error, text string, err error) *mcp.Cal
 		}
 	}
 	return raiseThrough(toolName, err.Error())
+}
+
+// panicBarrier converts a panic inside any handler into a failed request.
+//
+// The MCP SDK has no recover() on the receiving path, so without this an
+// unhandled panic in one tool call takes down the whole process — every other
+// session and every in-flight request with it. Installed once as receiving
+// middleware in [New] rather than wrapped around each of the 25 handlers.
+//
+// A panic is the Go analogue of the unhandled Python exception SPEC 5.2 routes
+// through FastMCP's wrapper, so for tools/call the result is the same
+// [raiseThrough] shape that an uncaught error produces. The panic value and its
+// stack go to stderr, where they stay visible to operators without entering the
+// protocol stream.
+//
+// This is a barrier for *panics* only. A Go out-of-memory is a fatal error, not
+// a panic, and cannot be recovered — the bounds in excelops are what keep those
+// from happening.
+func panicBarrier(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+			name := toolNameOf(req)
+			log.Printf("panic in %s %s: %v\n%s", method, name, r, debug.Stack())
+			if method == "tools/call" {
+				result, err = raiseThrough(name, fmt.Sprintf("%v", r)), nil
+				return
+			}
+			result, err = nil, fmt.Errorf("internal error in %s: %v", method, r)
+		}()
+		return next(ctx, method, req)
+	}
+}
+
+// toolNameOf recovers the tool name for a tools/call request, for the error
+// message and the log line. The SDK delivers tool arguments unparsed, so the
+// name is read from the raw params.
+func toolNameOf(req mcp.Request) string {
+	if p, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok && p != nil {
+		return p.Name
+	}
+	return "unknown"
 }
