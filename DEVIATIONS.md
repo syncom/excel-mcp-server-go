@@ -1,16 +1,17 @@
 # Deviations from the Python server
 
 This Go port reproduces `excel-mcp-server` byte for byte, including several of its
-oddities, with **seven** deliberate exceptions. This document is for someone deciding
+oddities, with **eight** deliberate exceptions. This document is for someone deciding
 whether to swap the servers: what the Python server does, what this one does instead, why,
 and who would notice.
 
-The set is closed: these seven are the only intended differences. Each was found by
+The set is closed: these eight are the only intended differences. Each was found by
 differential testing against the Python server, and each is pinned to an expectation on
 both sides, so a sanctioned difference cannot mask an unrelated regression.
 
 **Two of these change results you may be relying on** — D2 and D4. The rest either fix
-something that never worked (D1, D3, D5, D7) or change only documentation (D6).
+something that never worked (D1, D3, D5, D7), refuse a request that would otherwise kill
+the server (D8), or change only documentation (D6).
 
 ---
 
@@ -200,6 +201,61 @@ description differs from the Python server's.
 
 **Who notices:** nobody at call time — the behaviour is identical. A person reading the tool
 list sees accurate prose instead of a parameter that promises something it never did.
+
+---
+
+## D8 — oversized requests are refused instead of killing the server
+
+**This one is about availability, not results.** It is the only deviation that makes a
+request fail that Python would attempt.
+
+**Python:** three code paths are unbounded, and all three are reachable from a single
+ordinary tool call.
+
+- `read_data_from_excel` iterates `range(start_row, end_row + 1)` over an `end_cell` taken
+  straight from the caller, with no check against the sheet's extent. `openpyxl`'s
+  `ws.cell()` creates each cell it is asked for, so the loop happily walks the empty part
+  of the grid.
+- `format_range` has the same unclamped loop, and each iteration mutates workbook state.
+- `create_pivot_table` builds the full cartesian product of the distinct values of every
+  grouped field. Three fields over high-cardinality columns is N³ — and dates, IDs, names
+  and emails are exactly the columns people group by.
+
+CPython survives the first two: a `MemoryError` is an ordinary exception, so
+`except Exception` turns it into a `DataError` and the caller gets an error result back.
+
+**Go:** the same three paths are bounded, and exceeding a bound raises the calling tool's
+own error kind — so the refusal routes to the same MCP outcome as any other failure of
+that tool, and says what the limit was.
+
+| Path | Bound | Raised as |
+|---|---|---|
+| `read_data_from_excel` | 200,000 cells per range | `DataError` |
+| `format_range` | 200,000 cells per range | `FormattingError` |
+| `create_pivot_table` | 50,000 grouped combinations | `PivotError` |
+
+**Why this cannot be left to match Python.** A Go out-of-memory is `fatal error: out of
+memory` — not a panic, and not recoverable. There is no `recover()` that catches it. It
+takes down the whole process, every session on it and every in-flight request, so the
+failure is not confined to the caller who caused it. Reproduced against the built binary:
+`end_cell: "XFD1048576"` on a workbook with two data rows kills the server, and a pivot
+over three all-distinct columns of a 120-row sheet allocates 2 GB doing it. Neither needs
+a malformed argument or a crafted file.
+
+So for reads and formats the bound *restores* the observable Python outcome — an error
+result instead of a dead server. For pivots it is a genuine new refusal: Python has the
+same blowup and the port inherited it, and neither server produces anything useful at that
+size.
+
+**Where the numbers come from.** Measured cost per visited cell is ~800 B on the read path
+and ~2 KB on the format path, so 200,000 cells is a transient of roughly 150 MB and 360 MB.
+Both limits sit far above anything a caller can consume — 200,000 cells is already tens of
+megabytes of response text, and a pivot table with 50,000 grouped rows is not an answer to
+any question — and far below the point where the process is at risk.
+
+**Who notices:** nobody making a request whose result they intended to read. A caller who
+passed a deliberately oversized range — "read A1:XFD1048576, I'll take whatever is there" —
+now gets an error naming the limit instead of a dropped connection.
 
 ---
 

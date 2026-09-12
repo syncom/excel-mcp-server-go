@@ -1,10 +1,15 @@
 package excelops
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
+
+	"github.com/syncom/excel-mcp-server-go/internal/excelerr"
 )
 
 // sampleSource writes the four-row source table both pivot tests use.
@@ -121,5 +126,106 @@ func TestPivotRejectsOtherAggFuncs(t *testing.T) {
 				t.Fatalf("error = %q, want %q", err, want)
 			}
 		})
+	}
+}
+
+// distinctSource builds the shape finding 2 was reproduced against: an
+// ordinary, small sheet whose grouped columns hold all-distinct values, the way
+// dates, IDs, names and emails do. rows data rows over three such columns make
+// rows^3 combinations.
+func distinctSource(t *testing.T, dataRows int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "distinct.xlsx")
+	if err := CreateWorkbook(path, DefaultSheetName); err != nil {
+		t.Fatal(err)
+	}
+	f, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	header := []any{"ID", "Email", "Date", "Revenue"}
+	for c, v := range header {
+		cell, _ := excelize.CoordinatesToCellName(c+1, 1)
+		if err := f.SetCellValue("Sheet1", cell, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for r := 1; r <= dataRows; r++ {
+		row := []any{
+			fmt.Sprintf("id-%d", r),
+			fmt.Sprintf("user%d@example.com", r),
+			fmt.Sprintf("2026-01-%02d", r),
+			r,
+		}
+		for c, v := range row {
+			cell, _ := excelize.CoordinatesToCellName(c+1, r+1)
+			if err := f.SetCellValue("Sheet1", cell, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := f.Save(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Grouping three all-distinct columns is N^3. At 120 rows that is ~1.7M
+// combinations and over 2 GB — no hostile argument involved, just an ordinary
+// call on a small sheet. It must be refused before anything is allocated.
+func TestPivotRejectsCombinationBlowup(t *testing.T) {
+	path := distinctSource(t, 120)
+
+	_, err := CreatePivotTable(path, "Sheet1", "A1:D121",
+		[]string{"ID", "Email", "Date"}, []string{"Revenue"}, nil, "sum")
+	if err == nil {
+		t.Fatal("pivot over 1.7M combinations succeeded, want an error")
+	}
+	if !errors.Is(err, excelerr.ErrPivot) {
+		t.Errorf("kind = %v, want ErrPivot so create_pivot_table reports it as text", err)
+	}
+	if !strings.Contains(err.Error(), "combinations") {
+		t.Errorf("message = %q, want it to name the cause", err.Error())
+	}
+}
+
+// The cap must not disturb pivots a person would actually build. This one
+// groups a single high-cardinality column, which is well inside the limit.
+func TestPivotAllowsOrdinaryCardinality(t *testing.T) {
+	path := distinctSource(t, 200)
+
+	msg, err := CreatePivotTable(path, "Sheet1", "A1:D201",
+		[]string{"ID"}, []string{"Revenue"}, nil, "sum")
+	if err != nil {
+		t.Fatalf("ordinary pivot failed: %v", err)
+	}
+	if msg != "Summary table created successfully" {
+		t.Errorf("msg = %q, want the constant success message", msg)
+	}
+}
+
+// The limit is counted, not estimated, so the boundary is pinned directly.
+func TestCombinationsForBoundary(t *testing.T) {
+	// Two fields whose distinct counts multiply to exactly the limit.
+	const a, b = 500, maxPivotCombinations / 500
+	records := make([]map[string]any, 0, a)
+	for i := 0; i < a; i++ {
+		records = append(records, map[string]any{"x": i, "y": i % b})
+	}
+
+	got, err := combinationsFor(records, []string{"x", "y"})
+	if err != nil {
+		t.Fatalf("at the limit: got %v, want nil", err)
+	}
+	if len(got) != maxPivotCombinations {
+		t.Errorf("len = %d, want %d", len(got), maxPivotCombinations)
+	}
+
+	// One more distinct value on either axis crosses it.
+	records = append(records, map[string]any{"x": a, "y": 0})
+	if _, err := combinationsFor(records, []string{"x", "y"}); err == nil {
+		t.Error("one past the limit: got nil, want an error")
 	}
 }

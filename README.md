@@ -4,7 +4,7 @@ A Go port of [excel-mcp-server](https://github.com/haris-musa/excel-mcp-server),
 a drop-in replacement for the Python server over MCP stdio and streamable HTTP.
 
 It exposes the same 25 tools, with responses that are byte-for-byte identical to the
-Python server's — apart from seven deliberate, enumerated differences. Those are documented
+Python server's — apart from eight deliberate, enumerated differences. Those are documented
 in [DEVIATIONS.md](DEVIATIONS.md), and you should read that file before swapping the
 servers, because two of them change behaviour callers may be relying on.
 
